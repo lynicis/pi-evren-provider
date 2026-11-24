@@ -8,39 +8,81 @@ export function toTimestamp(value: unknown): number | undefined {
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
-export function amount(used: number | undefined, limit: number | undefined, remaining: number | undefined, unit: string) {
-  const usedFraction = used !== undefined && limit !== undefined && limit > 0 ? Math.min(used / limit, 1) : undefined;
+export type EvrenUsageParams = {
+  baseUrl?: string;
+  apiKey?: string;
+  credential?: {
+    type?: string;
+    apiKey?: string;
+    accessToken?: string;
+  };
+  signal?: AbortSignal;
+  provider?: string;
+};
+
+function resolveApiKey(params: EvrenUsageParams): string | undefined {
+  const fromCredential =
+    params.credential?.type === 'oauth'
+      ? params.credential.accessToken
+      : params.credential?.apiKey ?? params.credential?.accessToken;
+  const raw = fromCredential ?? params.apiKey;
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+export function amount(
+  used: number | undefined,
+  limit: number | undefined,
+  remaining: number | undefined,
+  unit: string,
+  usedFractionOverride?: number,
+) {
+  const computedRemaining =
+    remaining ?? (used !== undefined && limit !== undefined ? Math.max(limit - used, 0) : undefined);
+  const rawFraction =
+    used !== undefined && limit !== undefined && limit > 0
+      ? used / limit
+      : usedFractionOverride;
+  const usedFraction =
+    rawFraction !== undefined && Number.isFinite(rawFraction)
+      ? Math.min(Math.max(rawFraction, 0), 1)
+      : undefined;
   return {
     ...(used !== undefined ? { used } : {}),
     ...(limit !== undefined ? { limit } : {}),
-    ...(remaining !== undefined ? { remaining } : {}),
+    ...(computedRemaining !== undefined ? { remaining: computedRemaining } : {}),
     ...(usedFraction !== undefined ? { usedFraction } : {}),
     ...(usedFraction !== undefined ? { remainingFraction: Math.max(1 - usedFraction, 0) } : {}),
     unit,
   };
 }
 
-export function status(used: number | undefined, limit: number | undefined) {
-  if (used === undefined || limit === undefined || limit <= 0) return 'unknown';
-  const fraction = used / limit;
+export function status(used: number | undefined, limit: number | undefined, usedFractionOverride?: number) {
+  const fraction =
+    used !== undefined && limit !== undefined && limit > 0
+      ? used / limit
+      : usedFractionOverride;
+  if (fraction === undefined || !Number.isFinite(fraction)) return 'unknown';
   if (fraction >= 1) return 'exhausted';
   if (fraction >= 0.9) return 'warning';
   return 'ok';
 }
 
 export async function fetchEvrenUsage(
-  params: { baseUrl?: string; apiKey: string; signal?: AbortSignal; provider?: string },
+  params: EvrenUsageParams,
   ctx: {
     fetch: (url: string, init: unknown) => Promise<{ status: number; ok: boolean; json: () => Promise<unknown> }>;
     logger?: { debug: (message: string, data?: unknown) => void };
   },
 ) {
-  if (!params.apiKey) return null;
+  const apiKey = resolveApiKey(params);
+  if (!apiKey) return null;
+  const provider = params.provider ?? 'evren';
   const base = (params.baseUrl ?? 'https://evren-llmapi.ssyz.org.tr/v1').replace(/\/+$/, '').replace(/\/v1$/i, '');
   let response;
   try {
     response = await ctx.fetch(`${base}/v1/quota`, {
-      headers: { Authorization: `Bearer ${params.apiKey}`, Accept: 'application/json' },
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
       redirect: 'error',
       signal: params.signal,
     });
@@ -59,10 +101,14 @@ export async function fetchEvrenUsage(
 
   const used = toNumber(fields.used_tokens);
   const cap = toNumber(fields.cap);
+  const usageRatio = toNumber(fields.usage_ratio);
   const fiveRemaining = toNumber(fields.five_minute_remaining);
   const fiveLimit = toNumber(fields.five_minute_limit);
   const windowUsed = used ?? (fiveRemaining !== undefined && fiveLimit !== undefined ? fiveLimit - fiveRemaining : undefined);
   const windowLimit = cap ?? fiveLimit;
+  const rawWindowMinutes = toNumber(fields.window_minutes);
+  const windowMinutes = rawWindowMinutes !== undefined && rawWindowMinutes > 0 ? rawWindowMinutes : 5;
+  const windowId = `${windowMinutes}m`;
 
   const dailyUsed = toNumber(fields.daily_used_tokens);
   const dailyLimit = toNumber(fields.daily_limit_tokens) ?? toNumber(fields.daily_limit);
@@ -75,22 +121,32 @@ export async function fetchEvrenUsage(
   const computedConcurrent = concurrent ?? (concurrencyRemaining !== undefined && concurrentLimit !== undefined ? concurrentLimit - concurrencyRemaining : undefined);
 
   const limits: object[] = [];
-  if (windowUsed !== undefined || windowLimit !== undefined || fiveRemaining !== undefined) {
+  if (windowUsed !== undefined || windowLimit !== undefined || fiveRemaining !== undefined || usageRatio !== undefined) {
     const resetAt = toTimestamp(fields.reset_at);
     limits.push({
       id: 'evren:window', label: 'Token window',
-      scope: { provider: params.provider, windowId: '5m' },
-      window: { id: '5m', label: '5 Minute', ...(resetAt !== undefined ? { resetsAt: resetAt } : {}) },
-      amount: amount(windowUsed, windowLimit, fiveRemaining, 'tokens'),
-      status: status(windowUsed, windowLimit),
+      scope: { provider, windowId },
+      window: {
+        id: windowId,
+        label: `${windowMinutes} Minute`,
+        durationMs: windowMinutes * 60_000,
+        ...(resetAt !== undefined ? { resetsAt: resetAt } : {}),
+      },
+      amount: amount(windowUsed, windowLimit, fiveRemaining, 'tokens', usageRatio),
+      status: status(windowUsed, windowLimit, usageRatio),
     });
   }
   if (computedDailyUsed !== undefined || dailyLimit !== undefined || dailyRemaining !== undefined) {
     const resetAt = toTimestamp(fields.daily_reset_at);
     limits.push({
       id: 'evren:daily', label: 'Daily tokens',
-      scope: { provider: params.provider, windowId: '1d' },
-      window: { id: '1d', label: 'Daily', ...(resetAt !== undefined ? { resetsAt: resetAt } : {}) },
+      scope: { provider, windowId: '1d' },
+      window: {
+        id: '1d',
+        label: 'Daily',
+        durationMs: 86_400_000,
+        ...(resetAt !== undefined ? { resetsAt: resetAt } : {}),
+      },
       amount: amount(computedDailyUsed, dailyLimit, dailyRemaining, 'tokens'),
       status: status(computedDailyUsed, dailyLimit),
     });
@@ -98,14 +154,14 @@ export async function fetchEvrenUsage(
   if (computedConcurrent !== undefined || concurrentLimit !== undefined || concurrencyRemaining !== undefined) {
     limits.push({
       id: 'evren:concurrency', label: 'Concurrent requests',
-      scope: { provider: params.provider, windowId: 'concurrency' },
+      scope: { provider, windowId: 'concurrency' },
       amount: amount(computedConcurrent, concurrentLimit, concurrencyRemaining, 'requests'),
       status: status(computedConcurrent, concurrentLimit),
     });
   }
   if (limits.length === 0) return null;
   return {
-    provider: params.provider,
+    provider,
     fetchedAt: Date.now(),
     limits,
     ...(typeof fields.level === 'string' ? { notes: [`Quota level: ${fields.level}`] } : {}),

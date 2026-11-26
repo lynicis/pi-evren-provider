@@ -37,13 +37,34 @@ test('direct invocation allows, records success, and denies the next call', asyn
   );
 });
 
-test('registered usage descriptor preserves source-exact metadata', () => {
-  let descriptor: any;
-  const pi = { registerProvider(_name: string, value: any) { descriptor = value; } };
-  createEvrenProvider(pi);
-  assert.equal(descriptor.usage.id, 'evren');
-  assert.equal(descriptor.usage.cacheVersion, 1);
-  assert.equal(descriptor.usage.usesRequestKey, true);
-  assert.equal(typeof descriptor.usage.fetchUsage, 'function');
+test('native login, discovery and usage share the key', async () => {
+  let descriptor: {
+    oauth: { login(callbacks: { onPrompt(prompt: { message: string; secret: boolean }): Promise<string>; fetch: typeof fetch }): Promise<string> };
+    fetchDynamicModels(key?: string): Promise<{ id: string }[]>;
+    usage: { fetchUsage(params: { apiKey: string }, ctx: { fetch: typeof fetch }): Promise<unknown> };
+  } | undefined;
+  createEvrenProvider({ registerProvider(_name, value) { descriptor = value as typeof descriptor; } });
+  assert.ok(descriptor);
+  const requests: string[] = [];
+  const fetcher: typeof fetch = async (url, init) => {
+    requests.push(String(url));
+    assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer test-key');
+    return String(url).endsWith('/models') ? Response.json({ data: [{ id: 'tenant/gpt-new' }] }) : Response.json({});
+  };
+  const key = await descriptor.oauth.login({ onPrompt: async (prompt: unknown) => {
+    assert.deepEqual(prompt, { message: 'Evren API key', secret: true });
+    return ' test-key ';
+  }, fetch: fetcher });
+  assert.equal(key, 'test-key');
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = fetcher;
+  try {
+    assert.deepEqual(await descriptor.fetchDynamicModels(undefined), []);
+    assert.deepEqual((await descriptor.fetchDynamicModels(key)).map(row => row.id), ['tenant/gpt-new']);
+    await descriptor.usage.fetchUsage({ apiKey: key }, { fetch: fetcher });
+    await assert.rejects(descriptor.oauth.login({ onPrompt: async () => 'bad', fetch: async () => new Response('', { status: 401 }) }), /Evren rejected the API key/);
+    await assert.rejects(descriptor.oauth.login({ onPrompt: async () => { throw new Error('cancelled'); }, fetch: fetcher }), /cancelled/);
+    assert.equal(requests.length, 3);
+  } finally { globalThis.fetch = oldFetch; }
 });
 

@@ -1,51 +1,30 @@
 # Pi Evren Provider
 
-Register the Evren OpenAI-compatible provider with Pi and add process-local request or token quotas.
+Use Evren through native login and model discovery in Pi and OMP.
 
 [![CI](https://github.com/lynicis/pi-evren-provider/actions/workflows/ci.yml/badge.svg)](https://github.com/lynicis/pi-evren-provider/actions/workflows/ci.yml)
 
 ## Features
 
-- Registers the `evren` provider and usage metadata with Pi.
-- Fetches Evren usage from `/v1/quota` when a request key is available.
-- Enforces optional request, input-token, and output-token limits before provider calls.
+- Registers `evren` with native API-key login and model discovery.
+- OMP reports Evren usage from `/v1/quota`.
+- The separate `invokeEvren` helper enforces optional process-local quotas; normal chat does not use it.
 - Resets local quotas at minute, hour, or day boundaries.
 - Uses no external quota service or database; local state is in memory and resets with the process.
 
 ## Install
 
+Install a package version containing native provider support:
+
 ```bash
-npm install pi-evren-provider
+pi install npm:pi-evren-provider
+# or
+omp plugin install pi-evren-provider
 ```
 
-The package currently exports one default Pi registration function:
+Then use `/login evren`, select a discovered model with `/model`, and use `/logout` to remove the locally stored credential. Logout does not revoke the server key.
 
-```js
-import registerEvrenProvider from 'pi-evren-provider';
-
-registerEvrenProvider(pi);
-```
-
-
-## Configure Pi
-
-Add Evren to `~/.omp/agent/models.yml`:
-
-```yaml
-providers:
-  evren:
-    baseUrl: https://evren-llmapi.ssyz.org.tr/v1
-    apiKey: EVREN_API_KEY
-    auth: apiKey
-    authHeader: true
-    api: openai-responses
-    discovery:
-      type: openai-models-list
-    remoteCompaction:
-      enabled: false
-```
-
-`EVREN_API_KEY` is read by Pi as the configured API key source. Model discovery and provider calls use the Evren OpenAI-compatible endpoint.
+Previous users should remove only the old Evren provider stanza from their configuration and restart before logging in. The existing npm release may not yet contain these changes.
 
 ## Local quotas
 

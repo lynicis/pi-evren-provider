@@ -1,4 +1,4 @@
-// Pi provider registration and invocation wiring live here.
+import { EVREN_BASE_URL, fetchEvrenModels, validateEvrenKey } from './evren.ts';
 import { fetchEvrenUsage } from './evrenUsage.ts';
 import { checkQuota, recordQuotaUsage, type QuotaConfig } from './quota.ts';
 
@@ -42,6 +42,19 @@ export function createEvrenProvider(pi: {
   registerProvider(name: string, descriptor: unknown): unknown;
 }): void {
   pi.registerProvider('evren', {
+    baseUrl: EVREN_BASE_URL,
+    api: 'openai-responses',
+    authHeader: true,
+    oauth: {
+      name: 'Evren',
+      async login(callbacks: { onPrompt(prompt: { message: string; secret: boolean }): Promise<string>; signal?: AbortSignal; fetch?: typeof fetch }) {
+        const key = await callbacks.onPrompt({ message: 'Evren API key', secret: true });
+        return validateEvrenKey(key, callbacks.signal, callbacks.fetch);
+      },
+    },
+    async fetchDynamicModels(apiKey?: string) {
+      return apiKey ? fetchEvrenModels(apiKey) : [];
+    },
     usage: {
       id: 'evren',
       cacheVersion: 1,

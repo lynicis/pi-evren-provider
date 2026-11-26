@@ -1,6 +1,6 @@
 {
   "name": "pi-evren-provider",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Evren usage and quota provider for Pi",
   "license": "MIT",
   "type": "module",
